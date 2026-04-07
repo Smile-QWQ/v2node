@@ -24,6 +24,14 @@ type NetworkSettingsProxyProtocol struct {
 	AcceptProxyProtocol bool `json:"acceptProxyProtocol"`
 }
 
+type inboundBuildOptions struct {
+	ListenIP      string
+	ServerPort    int
+	SniffOverride []string
+	RouteOnly     bool
+	RealityDest   string
+}
+
 func (v *V2Core) removeInbound(tag string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -47,8 +55,73 @@ func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
 	return nil
 }
 
+func buildInbounds(nodeInfo *panel.NodeInfo, tag string) ([]*core.InboundHandlerConfig, error) {
+	if shouldEnableAntiStealReality(nodeInfo) {
+		loopbackPort, err := allocateAntiStealLoopbackPort(nodeInfo.Id)
+		if err != nil {
+			return nil, err
+		}
+		antiStealTag, ok := getAntiStealDokodemoTag(tag)
+		if !ok {
+			return nil, errors.New("anti-steal dokodemo tag is invalid")
+		}
+		dokodemoInbound, err := buildAntiStealDokodemoInbound(nodeInfo, antiStealTag, loopbackPort)
+		if err != nil {
+			return nil, err
+		}
+		mainInbound, err := buildInbound(nodeInfo, tag, &inboundBuildOptions{
+			SniffOverride: []string{"http", "tls", "quic"},
+			RouteOnly:     true,
+			RealityDest:   fmt.Sprintf("%s:%d", antiStealLoopbackHost, loopbackPort),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []*core.InboundHandlerConfig{dokodemoInbound, mainInbound}, nil
+	}
+	inboundConfig, err := buildInbound(nodeInfo, tag, nil)
+	if err != nil {
+		return nil, err
+	}
+	return []*core.InboundHandlerConfig{inboundConfig}, nil
+}
+
+func buildAntiStealDokodemoInbound(nodeInfo *panel.NodeInfo, tag string, port int) (*core.InboundHandlerConfig, error) {
+	address := net.ParseAddress(antiStealRealityTargetHost(nodeInfo))
+	networkList := coreConf.NetworkList{"tcp"}
+	settings, err := json.Marshal(&coreConf.DokodemoConfig{
+		Address:        &coreConf.Address{Address: address},
+		Port:           uint16(antiStealRealityTargetPort(nodeInfo)),
+		Network:        &networkList,
+		FollowRedirect: false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal anti-steal dokodemo settings error: %s", err)
+	}
+	in := &coreConf.InboundDetourConfig{
+		Protocol: "dokodemo-door",
+		Settings: (*json.RawMessage)(&settings),
+		Tag:      tag,
+		PortList: &coreConf.PortList{
+			Range: []coreConf.PortRange{
+				{
+					From: uint32(port),
+					To:   uint32(port),
+				},
+			},
+		},
+		ListenOn: &coreConf.Address{Address: net.ParseAddress(antiStealLoopbackHost)},
+		SniffingConfig: &coreConf.SniffingConfig{
+			Enabled:      true,
+			DestOverride: &coreConf.StringList{"tls"},
+			RouteOnly:    true,
+		},
+	}
+	return in.Build()
+}
+
 // BuildInbound build Inbound config for different protocol
-func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
+func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOptions) (*core.InboundHandlerConfig, error) {
 	in := &coreConf.InboundDetourConfig{}
 	var err error
 	switch nodeInfo.Type {
@@ -71,6 +144,22 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	}
 	if err != nil {
 		return nil, err
+	}
+	listenIP := nodeInfo.Common.ListenIP
+	serverPort := nodeInfo.Common.ServerPort
+	sniffOverride := []string{"http", "tls"}
+	routeOnly := false
+	if options != nil {
+		if options.ListenIP != "" {
+			listenIP = options.ListenIP
+		}
+		if options.ServerPort > 0 {
+			serverPort = options.ServerPort
+		}
+		if len(options.SniffOverride) > 0 {
+			sniffOverride = options.SniffOverride
+		}
+		routeOnly = options.RouteOnly
 	}
 	// Set network protocol
 	if len(nodeInfo.Common.NetworkSettings) > 0 {
@@ -99,17 +188,19 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	in.PortList = &coreConf.PortList{
 		Range: []coreConf.PortRange{
 			{
-				From: uint32(nodeInfo.Common.ServerPort),
-				To:   uint32(nodeInfo.Common.ServerPort),
+				From: uint32(serverPort),
+				To:   uint32(serverPort),
 			}},
 	}
 	// Set Listen IP address
-	ipAddress := net.ParseAddress(nodeInfo.Common.ListenIP)
+	ipAddress := net.ParseAddress(listenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
+	destOverride := coreConf.StringList(sniffOverride)
 	sniffingConfig := &coreConf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &coreConf.StringList{"http", "tls"},
+		DestOverride: &destOverride,
+		RouteOnly:    routeOnly,
 	}
 	in.SniffingConfig = sniffingConfig
 
@@ -148,15 +239,19 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		}
 		in.StreamSetting.Security = "reality"
 		v := nodeInfo.Common
-		dest := v.TlsSettings.Dest
-		if dest == "" {
-			dest = v.TlsSettings.ServerName
+		realityDest := ""
+		if options != nil {
+			realityDest = options.RealityDest
+		}
+		if realityDest == "" {
+			dest := v.TlsSettings.Dest
+			if dest == "" {
+				dest = v.TlsSettings.ServerName
+			}
+			realityDest = fmt.Sprintf("%s:%s", dest, v.TlsSettings.ServerPort)
 		}
 		xver := v.TlsSettings.Xver
-		d, err := json.Marshal(fmt.Sprintf(
-			"%s:%s",
-			dest,
-			v.TlsSettings.ServerPort))
+		d, err := json.Marshal(realityDest)
 		if err != nil {
 			return nil, fmt.Errorf("marshal reality dest error: %s", err)
 		}

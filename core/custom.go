@@ -42,6 +42,14 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	return false
 }
 
+func appendRouterRule(coreRouterConfig *coreConf.RouterConfig, rule map[string]interface{}) {
+	rawRule, err := json.Marshal(rule)
+	if err != nil {
+		return
+	}
+	coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+}
+
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
 	queryStrategy := "UseIPv4v6"
@@ -79,6 +87,19 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	}
 
 	for _, info := range infos {
+		if shouldEnableAntiStealReality(info) {
+			if antiStealTag, ok := getAntiStealDokodemoTag(info.Tag); ok {
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
+					"inboundTag":  antiStealTag,
+					"domain":      []string{antiStealRealityTargetHost(info)},
+					"outboundTag": "Default",
+				})
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
+					"inboundTag":  antiStealTag,
+					"outboundTag": "block",
+				})
+			}
+		}
 		if len(info.Common.Routes) == 0 {
 			continue
 		}
@@ -99,49 +120,29 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				}
 				coreDnsConfig.Servers = append(coreDnsConfig.Servers, server)
 			case "block":
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"domain":      route.Match,
 					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 			case "block_ip":
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"ip":          route.Match,
 					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 			case "block_port":
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"port":        strings.Join(route.Match, ","),
 					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 			case "protocol":
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"protocol":    route.Match,
 					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 			case "route":
 				if route.ActionValue == nil {
 					continue
@@ -151,16 +152,11 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if err != nil {
 					continue
 				}
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"domain":      route.Match,
 					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
 					continue
 				}
@@ -178,16 +174,11 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if err != nil {
 					continue
 				}
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"ip":          route.Match,
 					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
 					continue
 				}
@@ -205,16 +196,11 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if err != nil {
 					continue
 				}
-				rule := map[string]interface{}{
+				appendRouterRule(coreRouterConfig, map[string]interface{}{
 					"inboundTag":  info.Tag,
 					"network":     "tcp,udp",
 					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+				})
 				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
 					continue
 				}

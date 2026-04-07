@@ -104,7 +104,7 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
-	err := c.server.DelNode(c.tag)
+	err := c.server.DelNode(c.tag, c.info)
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}
