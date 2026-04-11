@@ -36,7 +36,7 @@ func antiStealRealityTargetHost(info *panel.NodeInfo) string {
 	if info == nil || info.Common == nil {
 		return ""
 	}
-	return strings.TrimSpace(info.Common.TlsSettings.ServerName)
+	return strings.TrimSpace(info.Common.TlsSettings.PrimaryServerName())
 }
 
 func antiStealRealityTargetPort(info *panel.NodeInfo) int {

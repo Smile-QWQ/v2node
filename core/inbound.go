@@ -239,6 +239,8 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOpt
 		}
 		in.StreamSetting.Security = "reality"
 		v := nodeInfo.Common
+		serverNames := v.TlsSettings.EffectiveServerNames()
+		shortIds := v.TlsSettings.EffectiveShortIds()
 		realityDest := ""
 		if options != nil {
 			realityDest = options.RealityDest
@@ -246,7 +248,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOpt
 		if realityDest == "" {
 			dest := v.TlsSettings.Dest
 			if dest == "" {
-				dest = v.TlsSettings.ServerName
+				dest = v.TlsSettings.PrimaryServerName()
 			}
 			realityDest = fmt.Sprintf("%s:%s", dest, v.TlsSettings.ServerPort)
 		}
@@ -259,9 +261,9 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOpt
 			Dest:        d,
 			Xver:        xver,
 			Show:        false,
-			ServerNames: []string{v.TlsSettings.ServerName},
+			ServerNames: serverNames,
 			PrivateKey:  v.TlsSettings.PrivateKey,
-			ShortIds:    []string{v.TlsSettings.ShortId},
+			ShortIds:    shortIds,
 			Mldsa65Seed: v.TlsSettings.Mldsa65Seed,
 		}
 	default:
