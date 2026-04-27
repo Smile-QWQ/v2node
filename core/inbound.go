@@ -113,7 +113,7 @@ func buildAntiStealDokodemoInbound(nodeInfo *panel.NodeInfo, tag string, port in
 		ListenOn: &coreConf.Address{Address: net.ParseAddress(antiStealLoopbackHost)},
 		SniffingConfig: &coreConf.SniffingConfig{
 			Enabled:      true,
-			DestOverride: &coreConf.StringList{"tls"},
+			DestOverride: coreConf.StringList{"tls"},
 			RouteOnly:    true,
 		},
 	}
@@ -199,7 +199,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOpt
 	destOverride := coreConf.StringList(sniffOverride)
 	sniffingConfig := &coreConf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &destOverride,
+		DestOverride: destOverride,
 		RouteOnly:    routeOnly,
 	}
 	in.SniffingConfig = sniffingConfig
