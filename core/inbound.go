@@ -147,7 +147,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, options *inboundBuildOpt
 	}
 	listenIP := nodeInfo.Common.ListenIP
 	serverPort := nodeInfo.Common.ServerPort
-	sniffOverride := []string{"http", "tls"}
+	sniffOverride := []string{"http", "tls", "quic"}
 	routeOnly := false
 	if options != nil {
 		if options.ListenIP != "" {
