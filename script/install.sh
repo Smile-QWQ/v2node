@@ -7,6 +7,13 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
+GEOIP_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
+GEOSITE_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+GEOIP_PATH="/etc/v2node/geoip.dat"
+GEOSITE_PATH="/etc/v2node/geosite.dat"
+GEO_UPDATE_TMP_DIR="/etc/v2node/.geo-update"
+GEO_UPDATE_CRON_FILE="/etc/cron.d/v2node-geo-update"
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -179,7 +186,7 @@ install_base() {
         need_install_yum wget curl unzip tar cronie socat ca-certificates pv
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv
+        need_install_apk wget curl unzip tar socat ca-certificates pv cronie
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
         need_install_apt wget curl unzip tar cron socat ca-certificates pv
@@ -215,6 +222,146 @@ check_status() {
         else
             return 1
         fi
+    fi
+}
+
+
+download_geo_file() {
+    local url="$1"
+    local output="$2"
+
+    rm -f "${output}"
+    if ! curl -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 "${url}" -o "${output}"; then
+        rm -f "${output}"
+        return 1
+    fi
+
+    if [[ ! -s "${output}" ]]; then
+        rm -f "${output}"
+        return 1
+    fi
+
+    return 0
+}
+
+restart_v2node_if_needed() {
+    local should_restart="${1:-true}"
+    if [[ "${should_restart}" != "true" ]]; then
+        return 0
+    fi
+
+    if [[ x"${release}" == x"alpine" ]]; then
+        service v2node restart
+    else
+        systemctl restart v2node
+    fi
+    sleep 2
+    check_status
+    if [[ $? == 0 ]]; then
+        echo -e "${green}v2node restarted automatically, new geo data is active${plain}"
+        return 0
+    fi
+
+    echo -e "${red}Geo data updated, but automatic v2node restart failed. Check v2node log.${plain}"
+    return 1
+}
+
+update_geo_data() {
+    local restart_after_update="${1:-true}"
+    local tmp_dir="${GEO_UPDATE_TMP_DIR}.$$"
+    local geoip_tmp="${tmp_dir}/geoip.dat"
+    local geosite_tmp="${tmp_dir}/geosite.dat"
+    local backup_dir=""
+    local replaced_geoip=false
+
+    mkdir -p /etc/v2node
+    rm -rf "${tmp_dir}"
+    mkdir -p "${tmp_dir}" || return 1
+
+    if ! download_geo_file "${GEOIP_URL}" "${geoip_tmp}"; then
+        echo -e "${red}Failed to download geoip.dat${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    if ! download_geo_file "${GEOSITE_URL}" "${geosite_tmp}"; then
+        echo -e "${red}Failed to download geosite.dat${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    backup_dir=$(mktemp -d /etc/v2node/.geo-backup.XXXXXX 2>/dev/null)
+    if [[ -z "${backup_dir}" ]]; then
+        echo -e "${red}Failed to create geo backup directory${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    if [[ -f "${GEOIP_PATH}" ]]; then
+        cp -f "${GEOIP_PATH}" "${backup_dir}/geoip.dat" || {
+            echo -e "${red}Failed to back up geoip.dat${plain}"
+            rm -rf "${tmp_dir}" "${backup_dir}"
+            return 1
+        }
+    fi
+
+    if [[ -f "${GEOSITE_PATH}" ]]; then
+        cp -f "${GEOSITE_PATH}" "${backup_dir}/geosite.dat" || {
+            echo -e "${red}Failed to back up geosite.dat${plain}"
+            rm -rf "${tmp_dir}" "${backup_dir}"
+            return 1
+        }
+    fi
+
+    if mv -f "${geoip_tmp}" "${GEOIP_PATH}"; then
+        replaced_geoip=true
+    else
+        echo -e "${red}Failed to update geoip.dat${plain}"
+        rm -rf "${tmp_dir}" "${backup_dir}"
+        return 1
+    fi
+
+    if ! mv -f "${geosite_tmp}" "${GEOSITE_PATH}"; then
+        echo -e "${red}Failed to update geosite.dat, rolling back${plain}"
+        if [[ -f "${backup_dir}/geoip.dat" ]]; then
+            mv -f "${backup_dir}/geoip.dat" "${GEOIP_PATH}" >/dev/null 2>&1 || true
+        elif [[ "${replaced_geoip}" == true ]]; then
+            rm -f "${GEOIP_PATH}" >/dev/null 2>&1 || true
+        fi
+        rm -rf "${tmp_dir}" "${backup_dir}"
+        return 1
+    fi
+
+    chmod 0644 "${GEOIP_PATH}" "${GEOSITE_PATH}" >/dev/null 2>&1 || true
+    rm -rf "${tmp_dir}" "${backup_dir}"
+    echo -e "${green}geoip.dat and geosite.dat updated successfully${plain}"
+
+    restart_v2node_if_needed "${restart_after_update}"
+    return $?
+}
+
+ensure_geo_update_schedule() {
+    cat > "${GEO_UPDATE_CRON_FILE}" <<'EOF'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3 * * * root /usr/bin/v2node update_geo
+EOF
+    chmod 0644 "${GEO_UPDATE_CRON_FILE}"
+}
+
+ensure_geo_update_service() {
+    if [[ x"${release}" == x"alpine" ]]; then
+        rc-update add crond default >/dev/null 2>&1 || true
+        service crond start >/dev/null 2>&1 || true
+    elif [[ x"${release}" == x"debian" || x"${release}" == x"ubuntu" ]]; then
+        systemctl enable cron >/dev/null 2>&1 || true
+        systemctl start cron >/dev/null 2>&1 || service cron start >/dev/null 2>&1 || true
+    elif [[ x"${release}" == x"arch" ]]; then
+        systemctl enable cronie >/dev/null 2>&1 || true
+        systemctl start cronie >/dev/null 2>&1 || true
+    else
+        systemctl enable crond >/dev/null 2>&1 || true
+        systemctl start crond >/dev/null 2>&1 || true
     fi
 }
 
@@ -378,6 +525,14 @@ EOF
     curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/Smile-QWQ/v2node/master/script/v2node.sh
     chmod +x /usr/bin/v2node
 
+    ensure_geo_update_schedule
+    ensure_geo_update_service
+    if [[ "${first_install}" == "true" ]]; then
+        update_geo_data false
+    else
+        update_geo_data true
+    fi
+
     cd $cur_dir
     rm -f install.sh
     echo "------------------------------------------"
@@ -393,6 +548,7 @@ EOF
     echo "v2node log          - 查看 v2node 日志"
     echo "v2node generate     - 生成 v2node 配置文件"
     echo "v2node update       - 更新 v2node"
+    echo "v2node update_geo   - update geoip/geosite data"
     echo "v2node update x.x.x - 更新 v2node 指定版本"
     echo "v2node install      - 安装 v2node"
     echo "v2node uninstall    - 卸载 v2node"

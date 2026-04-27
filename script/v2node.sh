@@ -7,6 +7,13 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
+GEOIP_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
+GEOSITE_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+GEOIP_PATH="/etc/v2node/geoip.dat"
+GEOSITE_PATH="/etc/v2node/geosite.dat"
+GEO_UPDATE_TMP_DIR="/etc/v2node/.geo-update"
+GEO_UPDATE_CRON_FILE="/etc/cron.d/v2node-geo-update"
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -176,6 +183,7 @@ uninstall() {
         systemctl daemon-reload
         systemctl reset-failed
     fi
+    rm -f "${GEO_UPDATE_CRON_FILE}"
     rm /etc/v2node/ -rf
     rm /usr/local/v2node/ -rf
 
@@ -248,6 +256,127 @@ restart() {
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
+}
+
+download_geo_file() {
+    local url="$1"
+    local output="$2"
+
+    rm -f "${output}"
+    if ! curl -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 "${url}" -o "${output}"; then
+        rm -f "${output}"
+        return 1
+    fi
+
+    if [[ ! -s "${output}" ]]; then
+        rm -f "${output}"
+        return 1
+    fi
+
+    return 0
+}
+
+restart_v2node_if_needed() {
+    if [[ x"${release}" == x"alpine" ]]; then
+        service v2node restart
+    else
+        systemctl restart v2node
+    fi
+    sleep 2
+    check_status
+    if [[ $? == 0 ]]; then
+        echo -e "${green}v2node 已自动重启，新的地理数据已生效${plain}"
+        return 0
+    fi
+
+    echo -e "${red}地理数据已更新，但 v2node 自动重启失败，请使用 v2node log 查看日志${plain}"
+    return 1
+}
+
+update_geo_data() {
+    local restart_after_update="${1:-true}"
+    local tmp_dir="${GEO_UPDATE_TMP_DIR}.$$"
+    local geoip_tmp="${tmp_dir}/geoip.dat"
+    local geosite_tmp="${tmp_dir}/geosite.dat"
+    local backup_dir=""
+    local geoip_backup=""
+    local replaced_geoip=false
+
+    mkdir -p /etc/v2node
+    rm -rf "${tmp_dir}"
+    mkdir -p "${tmp_dir}" || return 1
+
+    if ! download_geo_file "${GEOIP_URL}" "${geoip_tmp}"; then
+        echo -e "${red}下载 geoip.dat 失败${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    if ! download_geo_file "${GEOSITE_URL}" "${geosite_tmp}"; then
+        echo -e "${red}下载 geosite.dat 失败${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    backup_dir=$(mktemp -d /etc/v2node/.geo-backup.XXXXXX 2>/dev/null)
+    if [[ -z "${backup_dir}" ]]; then
+        echo -e "${red}创建 geo 数据备份目录失败${plain}"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    if [[ -f "${GEOIP_PATH}" ]]; then
+        cp -f "${GEOIP_PATH}" "${backup_dir}/geoip.dat" || {
+            echo -e "${red}备份 geoip.dat 失败${plain}"
+            rm -rf "${tmp_dir}" "${backup_dir}"
+            return 1
+        }
+    fi
+
+    if [[ -f "${GEOSITE_PATH}" ]]; then
+        cp -f "${GEOSITE_PATH}" "${backup_dir}/geosite.dat" || {
+            echo -e "${red}备份 geosite.dat 失败${plain}"
+            rm -rf "${tmp_dir}" "${backup_dir}"
+            return 1
+        }
+    fi
+
+    if mv -f "${geoip_tmp}" "${GEOIP_PATH}"; then
+        replaced_geoip=true
+    else
+        echo -e "${red}更新 geoip.dat 失败${plain}"
+        rm -rf "${tmp_dir}" "${backup_dir}"
+        return 1
+    fi
+
+    if ! mv -f "${geosite_tmp}" "${GEOSITE_PATH}"; then
+        echo -e "${red}更新 geosite.dat 失败，正在回滚${plain}"
+        if [[ -f "${backup_dir}/geoip.dat" ]]; then
+            mv -f "${backup_dir}/geoip.dat" "${GEOIP_PATH}" >/dev/null 2>&1 || true
+        elif [[ "${replaced_geoip}" == true ]]; then
+            rm -f "${GEOIP_PATH}" >/dev/null 2>&1 || true
+        fi
+        rm -rf "${tmp_dir}" "${backup_dir}"
+        return 1
+    fi
+
+    chmod 0644 "${GEOIP_PATH}" "${GEOSITE_PATH}" >/dev/null 2>&1 || true
+    rm -rf "${tmp_dir}" "${backup_dir}"
+    echo -e "${green}geoip.dat 和 geosite.dat 更新成功${plain}"
+
+    if [[ "${restart_after_update}" == "true" ]]; then
+        restart_v2node_if_needed
+        return $?
+    fi
+
+    return 0
+}
+
+update_geo() {
+    if update_geo_data true; then
+        return 0
+    fi
+    return 1
 }
 
 status() {
@@ -503,6 +632,7 @@ show_usage() {
     echo "v2node x25519       - 生成 x25519 密钥"
     echo "v2node generate     - 生成 v2node 配置文件"
     echo "v2node update       - 更新 v2node"
+    echo "v2node update_geo   - update geoip/geosite data"
     echo "v2node update x.x.x - 安装 v2node 指定版本"
     echo "v2node install      - 安装 v2node"
     echo "v2node uninstall    - 卸载 v2node"
@@ -531,13 +661,13 @@ show_menu() {
 ————————————————
   ${green}11.${plain} 查看 v2node 版本
   ${green}12.${plain} 升级 v2node 维护脚本
-  ${green}13.${plain} 生成 v2node 配置文件
-  ${green}14.${plain} 放行 VPS 的所有网络端口
-  ${green}15.${plain} 退出脚本
+  ${green}13.${plain} generate config file
+  ${green}14.${plain} update geoip/geosite data
+  ${green}15.${plain} open all VPS ports
+  ${green}16.${plain} exit
  "
- #后续更新可加入上方字符串中
     show_status
-    echo && read -rp "请输入选择 [0-15]: " num
+    echo && read -rp "请输入选择 [0-16]: " num
 
     case "${num}" in
         0) config ;;
@@ -554,9 +684,10 @@ show_menu() {
         11) check_install && show_v2node_version ;;
         12) update_shell ;;
         13) generate_config_file ;;
-        14) open_ports ;;
-        15) exit ;;
-        *) echo -e "${red}请输入正确的数字 [0-15]${plain}" ;;
+        14) check_install && update_geo ;;
+        15) open_ports ;;
+        16) exit ;;
+        *) echo -e "${red}请输入正确的数字 [0-16]${plain}" ;;
     esac
 }
 
@@ -571,6 +702,7 @@ if [[ $# > 0 ]]; then
         "disable") check_install 0 && disable 0 ;;
         "log") check_install 0 && show_log 0 ;;
         "update") check_install 0 && update 0 $2 ;;
+        "update_geo") check_install 0 && update_geo 0 ;;
         "config") config $* ;;
         "generate") generate_config_file ;;
         "install") check_uninstall 0 && install 0 ;;
